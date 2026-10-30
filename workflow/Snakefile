@@ -1,0 +1,51 @@
+
+from pathlib import Path
+import subprocess
+import sys
+
+PROJECT_ROOT = Path(workflow.basedir).parent
+INCOMING_DIR = PROJECT_ROOT / "data" / "incoming"
+INGEST_SCRIPT = PROJECT_ROOT / "workflow" / "scripts" / "ingest.py"
+
+
+rule ingest:
+    output:
+        touch("results/ingestion/.ingestion_complete")
+
+    log:
+        "logs/ingestion/snakemake.log"
+
+    run:
+        acquisition_folders = sorted(
+            path for path in INCOMING_DIR.iterdir()
+            if path.is_dir()
+        ) if INCOMING_DIR.exists() else []
+
+        if not acquisition_folders:
+            print("Aucune acquisition à importer dans data/incoming.")
+
+        else:
+            print(f"{len(acquisition_folders)} acquisition(s) détectée(s).")
+
+            for folder in acquisition_folders:
+                print(f"Ingestion de : {folder.name}")
+
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(INGEST_SCRIPT),
+                        "--project-root",
+                        str(PROJECT_ROOT),
+                        "--folder",
+                        folder.name
+                    ],
+                    check=True
+                )
+
+rule get_all_photos:
+    input:
+        script = "code/get_all_photos.py"
+    output:
+        "data/all_photos.txt"
+
+# Execution : snakemake ingest --cores 1 --force

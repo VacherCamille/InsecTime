@@ -42,10 +42,21 @@ rule ingest:
                     check=True
                 )
 
-rule get_all_photos:
+rule select_stacked:
     input:
-        script = "code/get_all_photos.py"
+        raw_dir="data/raw/{museum}/{date}/{camera}"
     output:
-        "data/all_photos.txt"
+        directory(
+            "data/intermediate/stacked/{museum}/{date}/{camera}"
+        )
+    log:
+        "logs/stacked/{museum}/{date}/{camera}.log"
+    shell:
+        """
+        python workflow/scripts/select_stacked.py \
+            --input-dir {input.raw_dir} \
+            --output-dir {output} \
+            > {log} 2>&1
+        """
 
 # Execution : snakemake ingest --cores 1 --force

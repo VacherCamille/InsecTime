@@ -9,3 +9,10 @@ dependencies:
   - r-base=4.5.3
   - r-tidyverse=2.0.0
   - snakemake=9.27.1
+  - exiftool=13.60
+  - opencv-python=5.0.0.93
+  - numpy=2.5.4
+  - pillow=13.0.0
+  - pytesseract=0.3.13
+  - streamlit=1.66.1
+  - pip=26.2.2

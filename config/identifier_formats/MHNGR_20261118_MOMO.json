@@ -1,0 +1,20 @@
+{
+    "museum": "MHNGR",
+    "date": "2026-11-18",
+    "camera": "MOMO",
+    "identifier_type": "prefix_body_number",
+    "prefix": "MHNGR",
+    "separator_1": "_",
+    "body": {
+        "type": "uppercase_letters",
+        "min_length": 5,
+        "max_length": 5
+    },
+    "separator_2": "_",
+    "number": {
+        "type": "digits",
+        "min_length": 1,
+        "max_length": 3
+    },
+    "pattern": "\\bMHNGR_[A-Z]{5,5}_[0-9]{1,3}\\b"
+}

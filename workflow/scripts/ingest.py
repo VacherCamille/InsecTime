@@ -264,10 +264,6 @@ def ingest_one(
         )
         write_registry_atomic(registry_path, registry_rows)
 
-        # Delete source only after successful copy, checksum verification,
-        # publication, and registry update.
-        shutil.rmtree(source)
-
         logging.info(
             "Importation réussie : %s (%d image(s))",
             acquisition_id,

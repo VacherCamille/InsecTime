@@ -1,24 +1,18 @@
+
 #!/usr/bin/env python3
 
 """
 extract_labels.py
 
-Extraction OCR des étiquettes présentes sur les images empilées.
-Extrait les identifiants respectant le format attendu
-    pour chaque musée.
-
-Entrées :
-    - Un dossier contenant les images sélectionnées.
-    - Un modèle OpenCV DB de détection de texte.
-
-Sortie :
-    - Un fichier CSV contenant le texte OCR de chaque image.
+Détection des étiquettes et extraction OCR des identifiants.
+Le format des identifiants est défini dans un fichier JSON.
 
 Les images sources ne sont jamais modifiées.
 """
 
 import argparse
 import csv
+import json
 import logging
 import re
 import sys
@@ -28,41 +22,25 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytesseract
-
+from PIL import Image
 
 
 SUPPORTED_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".tif", ".tiff"
 }
 
-def extract_identifiers(ocr_text, museum_id):
-    """
-    Extrait les identifiants respectant le format attendu
-    pour chaque musée.
-    """
+# Caractères autorisés pour la reconnaissance des identifiants.
+OCR_WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
 
-    patterns = {
-        "MHNGR": r"\bMHNGR_[A-Z]+_[0-9]{1,3}\b",
 
-        # Ajouter ici les formats des autres musées.
-    }
-
-    if museum_id not in patterns:
-        raise ValueError(
-            f"Aucun format d'identifiant défini pour {museum_id}"
-        )
-
-    pattern = patterns[museum_id]
-
-    identifiers = re.findall(pattern, ocr_text)
-
-    # Supprime les doublons en conservant l'ordre.
-    return list(dict.fromkeys(identifiers))
-
+# --------------------------------------------------
+# ARGUMENTS
+# --------------------------------------------------
 
 def parse_arguments():
+
     parser = argparse.ArgumentParser(
-        description="Extraction OCR des étiquettes d'insectes."
+        description="Détection OCR des étiquettes d'insectes."
     )
 
     parser.add_argument(
@@ -74,45 +52,43 @@ def parse_arguments():
     parser.add_argument(
         "--model",
         required=True,
-        help="Chemin vers le modèle OpenCV DB (.onnx)."
+        help="Chemin vers le modèle ONNX DB."
+    )
+
+    parser.add_argument(
+        "--identifier-config",
+        required=True,
+        help="Fichier JSON contenant le format des identifiants."
     )
 
     parser.add_argument(
         "--output-csv",
         required=True,
-        help="Chemin du fichier CSV de sortie."
-    )
-
-    parser.add_argument(
-        "--extensions",
-        nargs="+",
-        default=[".JPG", ".JPEG", ".PNG", ".TIF", ".TIFF"],
-        help="Extensions des images à traiter."
+        help="Chemin du CSV de sortie."
     )
 
     parser.add_argument(
         "--lang",
         default="eng",
-        help="Langue Tesseract (par défaut : eng)."
+        help="Langue Tesseract."
     )
 
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="Limiter le nombre d'images pour un test."
+        help="Nombre maximal d'images à traiter."
     )
-
-    parser.add_argument(
-    "--museum",
-    required=True,
-    help="Identifiant du musée."
-)
 
     return parser.parse_args()
 
 
+# --------------------------------------------------
+# LOGGING
+# --------------------------------------------------
+
 def configure_logging():
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -120,187 +96,457 @@ def configure_logging():
     )
 
 
-def load_model(model_path):
-    """Charge le modèle de détection de texte OpenCV DB."""
+# --------------------------------------------------
+# CONFIGURATION DES IDENTIFIANTS
+# --------------------------------------------------
 
-    if not model_path.exists():
+def load_identifier_pattern(config_path):
+
+    config_path = Path(config_path)
+
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            f"Configuration introuvable : {config_path}"
+        )
+
+    with config_path.open(encoding="utf-8") as file:
+        config = json.load(file)
+
+    if "pattern" not in config:
+        raise ValueError(
+            "Le fichier JSON ne contient pas de champ 'pattern'."
+        )
+
+    return re.compile(config["pattern"])
+
+
+# --------------------------------------------------
+# REDIMENSIONNEMENT
+# --------------------------------------------------
+
+def resize_fixed(
+    image,
+    target_width=1024,
+    target_height=768
+):
+    """
+    Redimensionne l'image dans une limite maximale
+    de 1024 x 768 pixels en conservant les proportions.
+    """
+
+    height, width = image.shape[:2]
+
+    scale = min(
+        target_width / width,
+        target_height / height
+    )
+
+    new_width = int(width * scale)
+    new_height = int(height * scale)
+
+    return cv2.resize(
+        image,
+        (new_width, new_height),
+        interpolation=cv2.INTER_AREA
+    )
+
+
+# --------------------------------------------------
+# CHARGEMENT DU MODÈLE DB
+# --------------------------------------------------
+
+def load_model(model_path):
+
+    model_path = Path(model_path)
+
+    if not model_path.is_file():
         raise FileNotFoundError(
             f"Modèle introuvable : {model_path}"
         )
 
     if not hasattr(cv2, "dnn_TextDetectionModel_DB"):
         raise RuntimeError(
-            "La fonction cv2.dnn_TextDetectionModel_DB est indisponible. "
-            "Installe opencv-contrib-python."
+            "cv2.dnn_TextDetectionModel_DB est indisponible. "
+            "Vérifie ton installation OpenCV."
         )
 
-    logging.info("Chargement du modèle : %s", model_path)
+    logging.info("Chargement du modèle DB : %s", model_path)
 
     model = cv2.dnn_TextDetectionModel_DB(str(model_path))
 
-    model.setBinaryThreshold(0.3)
-    model.setPolygonThreshold(0.5)
-    model.setMaxCandidates(200)
-    model.setUnclipRatio(2.0)
+    # Paramètres identiques au script de référence.
+    bin_thresh = 0.3
+    poly_thresh = 0.5
 
-    model.setInputParams(
-        scale=1.0 / 255.0,
-        size=(1024, 768),
-        mean=(122.6789, 116.6688, 104.0070),
-        swapRB=True
+    mean = (
+        122.67891434,
+        116.66876762,
+        104.00698793
     )
 
-    return model
+    model.setBinaryThreshold(bin_thresh)
+    model.setPolygonThreshold(poly_thresh)
+
+    return model, mean
 
 
-def order_points(points):
-    """Ordonne les quatre points d'un rectangle."""
+# --------------------------------------------------
+# ORDRE DES POINTS
+# --------------------------------------------------
 
-    points = np.asarray(points, dtype="float32")
+def order_quad(points):
 
-    ordered = np.zeros((4, 2), dtype="float32")
+    points = np.asarray(
+        points,
+        dtype=np.float32
+    )
 
     sums = points.sum(axis=1)
-    differences = np.diff(points, axis=1).flatten()
+    differences = np.diff(points, axis=1)
 
-    ordered[0] = points[np.argmin(sums)]        # Haut gauche
-    ordered[2] = points[np.argmax(sums)]        # Bas droite
-    ordered[1] = points[np.argmin(differences)] # Haut droite
-    ordered[3] = points[np.argmax(differences)] # Bas gauche
+    top_left = points[np.argmin(sums)]
+    bottom_right = points[np.argmax(sums)]
+    top_right = points[np.argmin(differences)]
+    bottom_left = points[np.argmax(differences)]
 
-    return ordered
+    return np.array(
+        [
+            top_left,
+            top_right,
+            bottom_right,
+            bottom_left
+        ],
+        dtype=np.float32
+    )
 
 
-def crop_text_region(image, box):
-    """Redresse une zone de texte détectée."""
+# --------------------------------------------------
+# AGRANDISSEMENT DES ZONES DÉTECTÉES
+# --------------------------------------------------
 
-    points = order_points(box)
+def expand_box(
+    bbox,
+    margin=10,
+    margin_side=10
+):
+
+    points = order_quad(bbox)
+
+    return np.array(
+        [
+            [
+                points[0, 0] - margin - margin_side,
+                points[0, 1] - margin
+            ],
+            [
+                points[1, 0] + margin + margin_side,
+                points[1, 1] - margin
+            ],
+            [
+                points[2, 0] + margin + margin_side,
+                points[2, 1] + margin
+            ],
+            [
+                points[3, 0] - margin - margin_side,
+                points[3, 1] + margin
+            ]
+        ],
+        dtype=np.float32
+    )
+
+
+# --------------------------------------------------
+# REDRESSEMENT HAUTE RÉSOLUTION
+# --------------------------------------------------
+
+def warp_box_high_res(image, vertices):
+
+    points = order_quad(vertices)
 
     top_left, top_right, bottom_right, bottom_left = points
 
-    width_a = np.linalg.norm(bottom_right - bottom_left)
-    width_b = np.linalg.norm(top_right - top_left)
+    width_a = np.linalg.norm(
+        bottom_right - bottom_left
+    )
 
-    height_a = np.linalg.norm(top_right - bottom_right)
-    height_b = np.linalg.norm(top_left - bottom_left)
+    width_b = np.linalg.norm(
+        top_right - top_left
+    )
 
-    width = max(int(max(width_a, width_b)), 1)
-    height = max(int(max(height_a, height_b)), 1)
+    height_a = np.linalg.norm(
+        top_right - bottom_right
+    )
 
-    destination = np.array([
-        [0, 0],
-        [width - 1, 0],
-        [width - 1, height - 1],
-        [0, height - 1]
-    ], dtype="float32")
+    height_b = np.linalg.norm(
+        top_left - bottom_left
+    )
+
+    max_width = max(
+        int(max(width_a, width_b)),
+        1
+    )
+
+    max_height = max(
+        int(max(height_a, height_b)),
+        1
+    )
+
+    destination = np.array(
+        [
+            [0, 0],
+            [max_width - 1, 0],
+            [max_width - 1, max_height - 1],
+            [0, max_height - 1]
+        ],
+        dtype=np.float32
+    )
 
     matrix = cv2.getPerspectiveTransform(
         points,
         destination
     )
 
-    return cv2.warpPerspective(
+    warped = cv2.warpPerspective(
         image,
         matrix,
-        (width, height)
+        (max_width, max_height),
+        flags=cv2.INTER_NEAREST
+    )
+
+    return warped
+
+
+# --------------------------------------------------
+# OCR D'UNE ZONE DE TEXTE
+# --------------------------------------------------
+
+def recognize_text(crop, language):
+
+    crop_rgb = cv2.cvtColor(
+        crop,
+        cv2.COLOR_BGR2RGB
+    )
+
+    pil_image = Image.fromarray(crop_rgb)
+
+    gray = pil_image.convert("L")
+
+    # Paramètres OCR du script de référence,
+    # avec une whitelist élargie.
+    config = (
+        "--psm 7 "
+        f"-c tessedit_char_whitelist={OCR_WHITELIST}"
+    )
+
+    raw = pytesseract.image_to_string(
+        gray,
+        lang=language,
+        config=config
+    )
+
+    # Nettoyage identique au script de référence.
+    text = (
+        raw.replace("\x0c", "")
+        .replace("\n", "")
+        .strip()
+    )
+
+    text = text.replace(" ", "")
+
+    return text
+
+
+# --------------------------------------------------
+# OCR COMPLET D'UNE IMAGE
+# --------------------------------------------------
+
+def extract_text_from_image(image, model, language):
+
+    # Redimensionnement identique au script de référence.
+    image = resize_fixed(
+        image,
+        target_width=1024,
+        target_height=768
+    )
+
+    # Taille d'entrée du modèle.
+    input_size = image.shape[:2]
+
+    # Paramètres du modèle DB.
+    mean = (
+        122.67891434,
+        116.66876762,
+        104.00698793
+    )
+
+    model.setInputParams(
+        1.0 / 255.0,
+        input_size,
+        mean,
+        True
+    )
+
+    boxes, _ = model.detect(image)
+
+    all_texts = []
+
+    if boxes is None or len(boxes) == 0:
+        return ""
+
+    # Lecture des zones de haut en bas,
+    # puis de gauche à droite.
+    boxes = sorted(
+        boxes,
+        key=lambda box: (
+            np.mean(np.asarray(box)[:, 1]),
+            np.mean(np.asarray(box)[:, 0])
+        )
+    )
+
+    for box in boxes:
+
+        expanded = expand_box(
+            box,
+            margin=10,
+            margin_side=10
+        )
+
+        crop = warp_box_high_res(
+            image,
+            expanded
+        )
+
+        if crop.size == 0:
+            continue
+
+        text = recognize_text(
+            crop,
+            language
+        )
+
+        if text:
+            all_texts.append(text)
+
+    return " | ".join(all_texts)
+
+
+# --------------------------------------------------
+# LECTURE DES IMAGES
+# --------------------------------------------------
+
+def read_image(image_path):
+    """
+    Lecture compatible avec les chemins contenant
+    des caractères spéciaux.
+    """
+
+    data = np.fromfile(
+        str(image_path),
+        dtype=np.uint8
+    )
+
+    return cv2.imdecode(
+        data,
+        cv2.IMREAD_COLOR
     )
 
 
-def clean_ocr_text(text):
-    """Nettoie les espaces et retours à la ligne."""
+# --------------------------------------------------
+# EXTRACTION DES IDENTIFIANTS
+# --------------------------------------------------
 
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+def extract_identifiers(ocr_text, identifier_pattern):
+
+    identifiers = identifier_pattern.findall(ocr_text)
+
+    # Suppression des doublons en conservant l'ordre.
+    return list(dict.fromkeys(identifiers))
 
 
-def extract_text_from_image(image, model, language):
-    """
-    Détecte les zones de texte puis applique Tesseract.
+# --------------------------------------------------
+# TRAITEMENT D'UNE IMAGE
+# --------------------------------------------------
 
-    Si aucune zone n'est détectée, applique Tesseract
-    directement sur l'image entière.
-    """
+def process_image(
+    image_path,
+    model,
+    identifier_pattern,
+    language
+):
 
-    boxes, confidences = model.detect(image)
+    result = {
+        "filename": image_path.name,
+        "ocr_text": "",
+        "identifiers": "",
+        "identifier_count": 0,
+        "ocr_status": "",
+        "identifier_status": ""
+    }
 
-    text_regions = []
+    try:
 
-    if boxes is not None and len(boxes) > 0:
-        # Lecture des zones de haut en bas,
-        # puis de gauche à droite.
-        boxes = sorted(
-            boxes,
-            key=lambda box: (
-                np.mean(np.asarray(box)[:, 1]),
-                np.mean(np.asarray(box)[:, 0])
-            )
-        )
+        image = read_image(image_path)
 
-        for box in boxes:
-            crop = crop_text_region(image, box)
-
-            if crop.size == 0:
-                continue
-
-            gray = cv2.cvtColor(
-                crop,
-                cv2.COLOR_BGR2GRAY
-            )
-
-            # Agrandissement pour faciliter la lecture OCR.
-            gray = cv2.resize(
-                gray,
-                None,
-                fx=2,
-                fy=2,
-                interpolation=cv2.INTER_CUBIC
+        if image is None:
+            raise ValueError(
+                "Impossible de lire l'image."
             )
 
-            text = pytesseract.image_to_string(
-                gray,
-                lang=language,
-                config="--psm 6"
-            )
-
-            text = clean_ocr_text(text)
-
-            if text:
-                text_regions.append(text)
-
-    else:
-        # Repli : OCR sur l'image entière.
-        gray = cv2.cvtColor(
+        ocr_text = extract_text_from_image(
             image,
-            cv2.COLOR_BGR2GRAY
+            model,
+            language
         )
 
-        text = pytesseract.image_to_string(
-            gray,
-            lang=language,
-            config="--psm 6"
+        result["ocr_text"] = ocr_text
+
+        if ocr_text:
+            result["ocr_status"] = "text_found"
+        else:
+            result["ocr_status"] = "no_text"
+
+        identifiers = extract_identifiers(
+            ocr_text,
+            identifier_pattern
         )
 
-        text = clean_ocr_text(text)
+        result["identifiers"] = ";".join(identifiers)
 
-        if text:
-            text_regions.append(text)
+        result["identifier_count"] = len(identifiers)
 
-    return " | ".join(text_regions)
+        if len(identifiers) == 0:
+            result["identifier_status"] = "no_valid_identifier"
+
+        elif len(identifiers) == 1:
+            result["identifier_status"] = "one_identifier"
+
+        else:
+            result["identifier_status"] = "multiple_identifiers"
+
+    except Exception:
+
+        logging.exception(
+            "Erreur pendant le traitement de %s",
+            image_path.name
+        )
+
+        result["ocr_status"] = "error"
+        result["identifier_status"] = "not_processed"
+
+    return result
 
 
-def read_image(image_path):
-    """Lecture compatible avec les chemins contenant des caractères spéciaux."""
-
-    data = np.fromfile(str(image_path), dtype=np.uint8)
-    return cv2.imdecode(data, cv2.IMREAD_COLOR)
-
+# --------------------------------------------------
+# PROGRAMME PRINCIPAL
+# --------------------------------------------------
 
 def main():
+
     args = parse_arguments()
+
     configure_logging()
 
     input_dir = Path(args.input_dir)
-    model_path = Path(args.model)
     output_csv = Path(args.output_csv)
 
     if not input_dir.is_dir():
@@ -310,24 +556,40 @@ def main():
         )
         return 1
 
-    extensions = {
-        extension.lower()
-        if extension.startswith(".")
-        else "." + extension.lower()
-        for extension in args.extensions
-    }
+    if args.limit is not None and args.limit < 1:
+        logging.error(
+            "--limit doit être supérieur à zéro."
+        )
+        return 1
 
+    # Chargement de la regex.
+    try:
+
+        identifier_pattern = load_identifier_pattern(
+            args.identifier_config
+        )
+
+        logging.info(
+            "Regex utilisée : %s",
+            identifier_pattern.pattern
+        )
+
+    except Exception as error:
+
+        logging.error(
+            "Erreur de configuration : %s",
+            error
+        )
+        return 1
+
+    # Recherche des images.
     images = sorted(
         path for path in input_dir.iterdir()
         if path.is_file()
-        and path.suffix.lower() in extensions
+        and path.suffix.lower() in SUPPORTED_EXTENSIONS
     )
 
     if args.limit is not None:
-        if args.limit < 1:
-            logging.error("--limit doit être supérieur à zéro.")
-            return 1
-
         images = images[:args.limit]
 
     if not images:
@@ -335,15 +597,21 @@ def main():
             "Aucune image trouvée dans %s",
             input_dir
         )
+        return 0
 
+    # Chargement du modèle.
     try:
-        model = load_model(model_path)
 
-        # Vérifie que Tesseract est accessible.
+        model, _ = load_model(args.model)
+
         pytesseract.get_tesseract_version()
 
     except Exception as error:
-        logging.error("Initialisation impossible : %s", error)
+
+        logging.error(
+            "Initialisation impossible : %s",
+            error
+        )
         return 1
 
     output_csv.parent.mkdir(
@@ -359,6 +627,7 @@ def main():
     )
 
     for index, image_path in enumerate(images, start=1):
+
         logging.info(
             "[%d/%d] Traitement de %s",
             index,
@@ -366,45 +635,24 @@ def main():
             image_path.name
         )
 
-        try:
-            image = read_image(image_path)
-
-            if image is None:
-                raise ValueError("Impossible de lire l'image.")
-
-            ocr_text = extract_text_from_image(
-                image,
-                model,
-                args.lang
-            )
-
-            status = "text_found" if ocr_text else "no_text"
-
-        except Exception as error:
-            logging.exception(
-                "Erreur pendant le traitement de %s",
-                image_path.name
-            )
-
-            ocr_text = ""
-            status = "error"
-
-        identifiers = extract_identifiers(
-            ocr_text,
-            args.museum
+        result = process_image(
+            image_path,
+            model,
+            identifier_pattern,
+            args.lang
         )
 
-        if identifiers:
-            status = "identifier_found"
-        else:
-            status = "no_valid_identifier"
+        results.append(result)
 
-        results.append({
-            "filename": image_path.name,
-            "ocr_text": ocr_text,
-            "identifiers": ";".join(identifiers),
-            "ocr_status": status
-        })
+    # Écriture du CSV.
+    fieldnames = [
+        "filename",
+        "ocr_text",
+        "identifiers",
+        "identifier_count",
+        "ocr_status",
+        "identifier_status"
+    ]
 
     with output_csv.open(
         "w",
@@ -414,17 +662,13 @@ def main():
 
         writer = csv.DictWriter(
             csv_file,
-            fieldnames=[
-                "filename",
-                "ocr_text",
-                "identifiers",
-                "ocr_status"
-            ]
+            fieldnames=fieldnames
         )
 
         writer.writeheader()
         writer.writerows(results)
 
+    # Bilan.
     logging.info(
         "Extraction terminée : %s",
         output_csv
@@ -436,18 +680,27 @@ def main():
     )
 
     logging.info(
-        "Textes détectés : %d",
-        sum(row["ocr_status"] == "text_found" for row in results)
+        "Identifiants trouvés : %d",
+        sum(
+            row["identifier_count"] > 0
+            for row in results
+        )
     )
 
     logging.info(
-        "Sans texte détecté : %d",
-        sum(row["ocr_status"] == "no_text" for row in results)
+        "Images sans identifiant valide : %d",
+        sum(
+            row["identifier_status"] == "no_valid_identifier"
+            for row in results
+        )
     )
 
     logging.info(
         "Erreurs : %d",
-        sum(row["ocr_status"] == "error" for row in results)
+        sum(
+            row["ocr_status"] == "error"
+            for row in results
+        )
     )
 
     return 0

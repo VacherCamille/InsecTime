@@ -4,6 +4,8 @@
 extract_labels.py
 
 Extraction OCR des étiquettes présentes sur les images empilées.
+Extrait les identifiants respectant le format attendu
+    pour chaque musée.
 
 Entrées :
     - Un dossier contenant les images sélectionnées.
@@ -28,9 +30,34 @@ import numpy as np
 import pytesseract
 
 
+
 SUPPORTED_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".tif", ".tiff"
 }
+
+def extract_identifiers(ocr_text, museum_id):
+    """
+    Extrait les identifiants respectant le format attendu
+    pour chaque musée.
+    """
+
+    patterns = {
+        "MHNGR": r"\bMHNGR_[A-Z]+_[0-9]{1,3}\b",
+
+        # Ajouter ici les formats des autres musées.
+    }
+
+    if museum_id not in patterns:
+        raise ValueError(
+            f"Aucun format d'identifiant défini pour {museum_id}"
+        )
+
+    pattern = patterns[museum_id]
+
+    identifiers = re.findall(pattern, ocr_text)
+
+    # Supprime les doublons en conservant l'ordre.
+    return list(dict.fromkeys(identifiers))
 
 
 def parse_arguments():
@@ -75,6 +102,12 @@ def parse_arguments():
         default=None,
         help="Limiter le nombre d'images pour un test."
     )
+
+    parser.add_argument(
+    "--museum",
+    required=True,
+    help="Identifiant du musée."
+)
 
     return parser.parse_args()
 
@@ -356,9 +389,20 @@ def main():
             ocr_text = ""
             status = "error"
 
+        identifiers = extract_identifiers(
+            ocr_text,
+            args.museum
+        )
+
+        if identifiers:
+            status = "identifier_found"
+        else:
+            status = "no_valid_identifier"
+
         results.append({
             "filename": image_path.name,
             "ocr_text": ocr_text,
+            "identifiers": ";".join(identifiers),
             "ocr_status": status
         })
 

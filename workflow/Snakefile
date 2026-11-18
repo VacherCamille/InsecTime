@@ -2,11 +2,28 @@
 from pathlib import Path
 import subprocess
 import sys
+import pandas as pd
 
 PROJECT_ROOT = Path(workflow.basedir).parent
 INCOMING_DIR = PROJECT_ROOT / "data" / "incoming"
 INGEST_SCRIPT = PROJECT_ROOT / "workflow" / "scripts" / "ingest.py"
 
+# Lecture du registre des acquisitions
+acquisitions = pd.read_csv(
+    "config/acquisitions.tsv",
+    sep="\t"
+)
+
+# Liste de toutes les sorties attendues
+stacked_targets = [
+    f"data/intermediate/stacked/{row.museum_id}/"
+    f"{row.acquisition_date}/{row.camera_id}"
+    for row in acquisitions.itertuples()
+]
+
+rule all:
+    input:
+        stacked_targets
 
 rule ingest:
     output:
@@ -58,5 +75,6 @@ rule select_stacked:
             --output-dir {output} \
             > {log} 2>&1
         """
+
 
 # Execution : snakemake ingest --cores 1 --force

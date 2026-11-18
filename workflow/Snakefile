@@ -21,9 +21,15 @@ stacked_targets = [
     for row in acquisitions.itertuples()
 ]
 
+ocr_targets = [
+    f"data/intermediate/ocr/{row.museum_id}/"
+    f"{row.acquisition_date}/{row.camera_id}/labels.csv"
+    for row in acquisitions.itertuples()
+]
+
 rule all:
     input:
-        stacked_targets
+        ocr_targets
 
 rule ingest:
     output:
@@ -76,5 +82,24 @@ rule select_stacked:
             > {log} 2>&1
         """
 
+
+rule extract_labels:
+    input:
+        stacked_dir="data/intermediate/stacked/{museum}/{date}/{camera}"
+    output:
+        labels="data/intermediate/ocr/{museum}/{date}/{camera}/labels.csv"
+    params:
+        model="Models/DB_TD500_resnet18.onnx"
+    log:
+        "logs/ocr/{museum}/{date}/{camera}.log"
+    threads: 1
+    shell:
+        """
+        python workflow/scripts/extract_labels.py \
+            --input-dir {input.stacked_dir:q} \
+            --model {params.model:q} \
+            --output-csv {output.labels:q} \
+            > {log:q} 2>&1
+        """
 
 # Execution : snakemake ingest --cores 1 --force
